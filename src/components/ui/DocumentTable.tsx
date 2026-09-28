@@ -18,7 +18,7 @@ interface DocumentResult {
 }
 
 interface Props {
-  uri: string
+  connectionId: string
   database: string
   collection: string
   query: QueryState
@@ -66,7 +66,7 @@ const KIND_COLOR: Record<string, string> = {
 
 // ── component ─────────────────────────────────────────────────────────────────
 
-export default function DocumentTable({ uri, database, collection, query }: Props) {
+export default function DocumentTable({ connectionId, database, collection, query }: Props) {
   const [result,     setResult]     = useState<DocumentResult | null>(null)
   const [loading,    setLoading]    = useState(false)
   const [error,      setError]      = useState<string | null>(null)
@@ -89,7 +89,7 @@ export default function DocumentTable({ uri, database, collection, query }: Prop
   // ── fetch ─────────────────────────────────────────────────────────────────
 
   const fetchDocuments = useCallback(async (pageNum: number, keepColumns = false) => {
-    if (!uri || !database || !collection) return
+    if (!connectionId || !database || !collection) return
 
     abortRef.current?.abort()
     const ctrl = new AbortController()
@@ -103,7 +103,7 @@ export default function DocumentTable({ uri, database, collection, query }: Prop
       const res  = await fetch('/api/documents', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ uri, database, collection, ...query, skip }),
+        body:    JSON.stringify({ connectionId, database, collection, ...query, skip }),
         signal:  ctrl.signal,
       })
       const data = await res.json()
@@ -133,13 +133,13 @@ export default function DocumentTable({ uri, database, collection, query }: Prop
     } finally {
       setLoading(false)
     }
-  }, [uri, database, collection, query])
+  }, [connectionId, database, collection, query])
 
   // Reset page + columns when the collection or query changes (not on page-only changes)
   const prevCollectionRef = useRef('')
   const prevQueryRef      = useRef('')
   useEffect(() => {
-    const collKey  = `${uri}|${database}|${collection}`
+    const collKey  = `${connectionId}|${database}|${collection}`
     const queryKey = JSON.stringify(query)
     const collChanged  = collKey  !== prevCollectionRef.current
     const queryChanged = queryKey !== prevQueryRef.current
@@ -157,24 +157,31 @@ export default function DocumentTable({ uri, database, collection, query }: Prop
       setPage(1)
       setResult(null)
     }
-  }, [uri, database, collection, query])
+  }, [connectionId, database, collection, query])
 
   useEffect(() => {
+    // Fetching from the server on page/query change — synchronizing with
+    // an external system, which is exactly what effects are for.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchDocuments(page, /* keepColumns */ columns.length > 0)
   }, [fetchDocuments, page]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── CRUD handlers ─────────────────────────────────────────────────────────
 
   async function handleDelete(doc: Record<string, unknown>) {
-    const id = getDocId(doc)
-    if (!id) return
+    const displayId = getDocId(doc)
+    if (!displayId) return
     if (!confirm('Delete this document permanently?')) return
-    setDeletingId(id)
+    setDeletingId(displayId)
     try {
       const res  = await fetch('/api/documents', {
         method:  'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ uri, database, collection, id }),
+        // Send the already-serialized `_id` (e.g. {"$oid": "..."}) exactly
+        // as the server returned it, rather than a flattened/guessed string
+        // — this is what lets the API tell a 24-hex-char *string* id apart
+        // from an ObjectId.
+        body:    JSON.stringify({ connectionId, database, collection, id: doc._id }),
       })
       const data = await res.json()
       if (data.success) {
@@ -193,7 +200,7 @@ export default function DocumentTable({ uri, database, collection, query }: Prop
     const res  = await fetch('/api/documents', {
       method:  'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ uri, database, collection, document: doc }),
+      body:    JSON.stringify({ connectionId, database, collection, document: doc }),
     })
     const data = await res.json()
     if (data.success) {
@@ -208,14 +215,15 @@ export default function DocumentTable({ uri, database, collection, query }: Prop
 
   async function handleEditSave(doc: Record<string, unknown>): Promise<void> {
     if (!editing) return
-    const id = getDocId(editing)
-    if (!id) { toast.error('Cannot determine document _id'); return }
+    const displayId = getDocId(editing)
+    if (!displayId) { toast.error('Cannot determine document _id'); return }
 
-    const { _id, ...update } = doc
+    const { _id: _omit, ...update } = doc
+    void _omit
     const res  = await fetch('/api/documents', {
       method:  'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ uri, database, collection, id, update }),
+      body:    JSON.stringify({ connectionId, database, collection, id: editing._id, update }),
     })
     const data = await res.json()
     if (data.success) {
@@ -443,6 +451,7 @@ export default function DocumentTable({ uri, database, collection, query }: Prop
       )}
       {editing  && (
         <DocumentEditor
+          key={getDocId(editing)}
           document={editing}
           mode="edit"
           onSave={handleEditSave}
@@ -451,6 +460,7 @@ export default function DocumentTable({ uri, database, collection, query }: Prop
       )}
       {inserting && (
         <DocumentEditor
+          key="insert"
           document={{}}
           mode="insert"
           onSave={handleInsertSave}

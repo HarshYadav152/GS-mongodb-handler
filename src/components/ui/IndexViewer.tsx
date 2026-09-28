@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
-import { RefreshCw, Plus, Trash2, Key, BarChart2, X, Check, AlertCircle } from 'lucide-react'
+import { RefreshCw, Plus, Trash2, Key, X, Check, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
 
 interface IndexInfo {
@@ -22,7 +22,7 @@ interface CollectionStats {
 }
 
 interface Props {
-  uri: string
+  connectionId: string
   database: string
   collection: string
   onClose: () => void
@@ -44,7 +44,7 @@ function StatCard({ label, value }: { label: string; value: string }) {
   )
 }
 
-export default function IndexViewer({ uri, database, collection, onClose }: Props) {
+export default function IndexViewer({ connectionId, database, collection, onClose }: Props) {
   const [indexes, setIndexes]   = useState<IndexInfo[]>([])
   const [stats, setStats]       = useState<CollectionStats | null>(null)
   const [loading, setLoading]   = useState(false)
@@ -65,7 +65,7 @@ export default function IndexViewer({ uri, database, collection, onClose }: Prop
     try {
       const res  = await fetch('/api/indexes', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri, database, collection }),
+        body: JSON.stringify({ connectionId, database, collection }),
       })
       const data = await res.json()
       if (data.success) {
@@ -76,8 +76,10 @@ export default function IndexViewer({ uri, database, collection, onClose }: Prop
       }
     } catch { toast.error('Network error') }
     finally { setLoading(false) }
-  }, [uri, database, collection])
+  }, [connectionId, database, collection])
 
+  // Fetching from the server on mount/dependency change.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchIndexes() }, [fetchIndexes])
 
   async function handleCreate() {
@@ -95,7 +97,7 @@ export default function IndexViewer({ uri, database, collection, onClose }: Prop
     try {
       const res  = await fetch('/api/indexes', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri, database, collection, keys, options }),
+        body: JSON.stringify({ connectionId, database, collection, keys, options }),
       })
       const data = await res.json()
       if (data.success) {
@@ -116,7 +118,7 @@ export default function IndexViewer({ uri, database, collection, onClose }: Prop
     try {
       const res  = await fetch('/api/indexes', {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri, database, collection, indexName }),
+        body: JSON.stringify({ connectionId, database, collection, indexName }),
       })
       const data = await res.json()
       if (data.success) { toast.success(`Index "${indexName}" dropped`); await fetchIndexes() }
