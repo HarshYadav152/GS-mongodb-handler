@@ -16,7 +16,11 @@ export default function ThemeProvider({ children }: { children: React.ReactNode 
   const [theme, setTheme] = useState<Theme>('dark')
 
   useEffect(() => {
+    // Read on mount (not via useState's lazy initializer) deliberately:
+    // localStorage isn't available during server rendering, so reading it
+    // eagerly would cause a hydration mismatch between server and client.
     const saved = localStorage.getItem('theme') as Theme
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (saved) setTheme(saved)
   }, [])
 

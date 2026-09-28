@@ -17,7 +17,7 @@ export interface QueryState {
 
 export default function AppShell() {
   const { theme, toggle } = useTheme()
-  const [activeUri, setActiveUri] = useState<string | null>(null)
+  const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
   const [activeConnName, setActiveConnName] = useState<string | null>(null)
   const [activeDb, setActiveDb] = useState<string | null>(null)
   const [activeCol, setActiveCol] = useState<string | null>(null)
@@ -31,8 +31,8 @@ export default function AppShell() {
     skip: 0,
   })
 
-  function handleConnect(uri: string, name: string) {
-    setActiveUri(uri)
+  function handleConnect(connectionId: string, name: string) {
+    setActiveConnectionId(connectionId)
     setActiveConnName(name)
     setActiveDb(null)
     setActiveCol(null)
@@ -62,7 +62,7 @@ export default function AppShell() {
       )}
 
       <Sidebar
-        uri={activeUri}
+        connectionId={activeConnectionId}
         activeDb={activeDb}
         activeCol={activeCol}
         mobileOpen={sidebarOpen}
@@ -102,7 +102,7 @@ export default function AppShell() {
             <div className="flex items-center gap-2 shrink-0">
               <Database size={16} style={{ color: 'var(--brand)' }} />
               <span className="font-semibold text-sm tracking-tight" style={{ color: 'var(--text-1)' }}>
-                MongoCraft
+                GS-mongo
               </span>
             </div>
             {activeConnName && (
@@ -135,7 +135,7 @@ export default function AppShell() {
           </div>
 
           <div className="flex items-center gap-1 shrink-0">
-            {activeUri && activeDb && activeCol && (
+            {activeConnectionId && activeDb && activeCol && (
               <button
                 onClick={() => setShowIndexes(true)}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs border transition-colors hover:bg-white/5"
@@ -166,16 +166,16 @@ export default function AppShell() {
         </header>
 
         {/* Query bar – only shown when a collection is active */}
-        {activeUri && activeDb && activeCol && (
-          <QueryBar query={query} onChange={setQuery} />
+        {activeConnectionId && activeDb && activeCol && (
+          <QueryBar key={`${activeDb}.${activeCol}`} query={query} onChange={setQuery} />
         )}
 
         {/* Main content area */}
         <main className="flex-1 overflow-auto">
-          {activeUri && activeDb && activeCol ? (
+          {activeConnectionId && activeDb && activeCol ? (
             <div className="p-4">
               <DocumentTable
-                uri={activeUri}
+                connectionId={activeConnectionId}
                 database={activeDb}
                 collection={activeCol}
                 query={query}
@@ -183,7 +183,7 @@ export default function AppShell() {
             </div>
           ) : (
             <EmptyState
-              connected={!!activeUri}
+              connected={!!activeConnectionId}
               connName={activeConnName}
               onConnect={() => setShowConnMgr(true)}
             />
@@ -193,16 +193,16 @@ export default function AppShell() {
 
       {showConnMgr && (
         <ConnectionManager
-          currentUri={activeUri}
+          currentConnectionId={activeConnectionId}
           onConnect={handleConnect}
-          onClose={() => activeUri ? setShowConnMgr(false) : undefined}
-          canClose={!!activeUri}
+          onClose={() => activeConnectionId ? setShowConnMgr(false) : undefined}
+          canClose={!!activeConnectionId}
         />
       )}
 
-      {showIndexes && activeUri && activeDb && activeCol && (
+      {showIndexes && activeConnectionId && activeDb && activeCol && (
         <IndexViewer
-          uri={activeUri}
+          connectionId={activeConnectionId}
           database={activeDb}
           collection={activeCol}
           onClose={() => setShowIndexes(false)}
