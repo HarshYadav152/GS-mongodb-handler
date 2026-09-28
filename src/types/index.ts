@@ -1,15 +1,12 @@
+// A saved connection as seen by the browser: never the raw URI, never the
+// ciphertext — only an opaque id, a display name, and a masked URI for
+// showing in the list. The server resolves `id` to the real URI itself.
 export interface SavedConnection {
   id: string
   name: string
-  encryptedUri: string  // AES-256 encrypted
+  maskedUri: string
   createdAt: string
   lastUsed?: string
-}
-
-export interface ActiveConnection {
-  id: string
-  name: string
-  uri: string
 }
 
 export interface DatabaseInfo {
