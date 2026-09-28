@@ -1,30 +1,24 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import {
   X, Plus, Trash2, Edit2, Check, Zap, Eye, EyeOff,
-  Wifi, WifiOff, Clock, CircleDot,
+  Wifi, WifiOff, Clock, CircleDot, LogOut,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import {
-  loadConnections,
-  addConnection,
-  deleteConnection,
-  updateConnection,
-  getDecryptedUri,
-  touchLastUsed,
-} from '@/lib/storage'
+import { useRouter } from 'next/navigation'
 import type { SavedConnection } from '@/types'
 
 interface Props {
-  currentUri: string | null
-  onConnect: (uri: string, name: string) => void
+  currentConnectionId: string | null
+  onConnect: (connectionId: string, name: string) => void
   onClose: () => void
   canClose: boolean
 }
 
 type TestStatus = 'idle' | 'testing' | 'ok' | 'fail'
 
-export default function ConnectionManager({ currentUri, onConnect, onClose, canClose }: Props) {
+export default function ConnectionManager({ currentConnectionId, onConnect, onClose, canClose }: Props) {
+  const router = useRouter()
   const [connections, setConnections] = useState<SavedConnection[]>([])
   const [form, setForm] = useState({ name: '', uri: '' })
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -34,20 +28,29 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
   const [connectingId, setConnectingId] = useState<string | null>(null)
   const [serverInfo, setServerInfo] = useState<{ version?: string; latencyMs?: number } | null>(null)
 
-  function reload() {
-    setConnections(loadConnections())
-  }
-
-  useEffect(() => {
-    reload()
+  const reload = useCallback(async () => {
+    try {
+      const res = await fetch('/api/connections')
+      const data = await res.json()
+      if (data.success) setConnections(data.data)
+      else toast.error(data.error || 'Failed to load connections')
+    } catch {
+      toast.error('Network error loading connections')
+    }
   }, [])
 
-  async function testUri(uri: string, onResult?: (ok: boolean) => void) {
+  useEffect(() => {
+    // Initial data fetch on mount — synchronizing with the server.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    reload()
+  }, [reload])
+
+  async function testUri(body: { uri: string } | { connectionId: string }, onResult?: (ok: boolean) => void) {
     try {
       const res = await fetch('/api/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri }),
+        body: JSON.stringify(body),
       })
       const data = await res.json()
       if (data.success) {
@@ -68,10 +71,12 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
   }
 
   async function handleFormTest() {
-    if (!form.uri) return
+    // Editing without typing a new URI → test the already-saved connection.
+    const body = form.uri.trim() ? { uri: form.uri.trim() } : editingId ? { connectionId: editingId } : null
+    if (!body) return
     setFormTestStatus('testing')
     setServerInfo(null)
-    const ok = await testUri(form.uri)
+    const ok = await testUri(body)
     setFormTestStatus(ok ? 'ok' : 'fail')
     if (ok) toast.success('Connection successful!')
     else toast.error('Connection failed')
@@ -79,32 +84,47 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
 
   async function handleSave() {
     if (!form.name.trim()) return toast.error('Connection name is required')
-    if (!form.uri.trim()) return toast.error('MongoDB URI is required')
-    if (editingId) {
-      updateConnection(editingId, form.name.trim(), form.uri.trim())
-      toast.success('Connection updated')
-      setEditingId(null)
-    } else {
-      addConnection(form.name.trim(), form.uri.trim())
-      toast.success('Connection saved')
+    if (!editingId && !form.uri.trim()) return toast.error('MongoDB URI is required')
+
+    try {
+      if (editingId) {
+        const res = await fetch(`/api/connections/${editingId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: form.name.trim(), uri: form.uri.trim() || undefined }),
+        })
+        const data = await res.json()
+        if (!data.success) return toast.error(data.error || 'Failed to update connection')
+        toast.success('Connection updated')
+        setEditingId(null)
+      } else {
+        const res = await fetch('/api/connections', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: form.name.trim(), uri: form.uri.trim() }),
+        })
+        const data = await res.json()
+        if (!data.success) return toast.error(data.error || 'Failed to save connection')
+        toast.success('Connection saved')
+      }
+      setForm({ name: '', uri: '' })
+      setFormTestStatus('idle')
+      setServerInfo(null)
+      reload()
+    } catch {
+      toast.error('Network error')
     }
-    setForm({ name: '', uri: '' })
-    setFormTestStatus('idle')
-    setServerInfo(null)
-    reload()
   }
 
   async function handleConnect(id: string) {
     setConnectingId(id)
     setTestingId(id)
     try {
-      const uri = getDecryptedUri(id)
-      const ok = await testUri(uri)
+      const ok = await testUri({ connectionId: id })
       if (ok) {
-        touchLastUsed(id)
-        reload()
+        reload() // refreshes lastUsed timestamp shown in the list
         const conn = connections.find((c) => c.id === id)
-        onConnect(uri, conn?.name || 'Unknown')
+        onConnect(id, conn?.name || 'Unknown')
         toast.success('Connected!')
       }
     } finally {
@@ -115,10 +135,12 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
 
   function handleEdit(conn: SavedConnection) {
     setEditingId(conn.id)
-    setForm({ name: conn.name, uri: getDecryptedUri(conn.id) })
+    // The raw connection string never comes back to the browser — leave the
+    // field blank; the server keeps the existing URI unless a new one is typed.
+    setForm({ name: conn.name, uri: '' })
     setFormTestStatus('idle')
     setServerInfo(null)
-    setShowUri(false)  // always hide URI when switching to a different connection
+    setShowUri(false)
   }
 
   function handleCancelEdit() {
@@ -129,11 +151,23 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
     setShowUri(false)
   }
 
-  function handleDelete(id: string) {
+  async function handleDelete(id: string) {
     if (!confirm('Delete this connection?')) return
-    deleteConnection(id)
-    reload()
-    toast.success('Connection deleted')
+    try {
+      const res = await fetch(`/api/connections/${id}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (!data.success) return toast.error(data.error || 'Failed to delete connection')
+      reload()
+      toast.success('Connection deleted')
+    } catch {
+      toast.error('Network error')
+    }
+  }
+
+  async function handleLogout() {
+    await fetch('/api/auth/logout', { method: 'POST' })
+    router.replace('/login')
+    router.refresh()
   }
 
   const isFormDirty = form.name.trim() || form.uri.trim()
@@ -168,18 +202,28 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
               Connection Manager
             </h2>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>
-              URIs are encrypted with AES-256 before saving
+              Connection strings are encrypted at rest on the server and never sent back to the browser
             </p>
           </div>
-          {canClose && (
+          <div className="flex items-center gap-1">
             <button
-              onClick={onClose}
+              onClick={handleLogout}
               className="p-1.5 rounded transition-colors hover:bg-white/5"
               style={{ color: 'var(--text-3)' }}
+              title="Sign out"
             >
-              <X size={16} />
+              <LogOut size={16} />
             </button>
-          )}
+            {canClose && (
+              <button
+                onClick={onClose}
+                className="p-1.5 rounded transition-colors hover:bg-white/5"
+                style={{ color: 'var(--text-3)' }}
+              >
+                <X size={16} />
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="overflow-y-auto flex-1">
@@ -202,16 +246,20 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
                 onFocus={(e) => (e.target.style.borderColor = 'var(--brand)')}
                 onBlur={(e) => (e.target.style.borderColor = 'var(--border)')}
               />
+
               <div className="relative">
                 <input
                   value={form.uri}
                   onChange={(e) => {
                     setForm((p) => ({ ...p, uri: e.target.value }))
                     setFormTestStatus('idle')
-                    setServerInfo(null)
                   }}
                   type={showUri ? 'text' : 'password'}
-                  placeholder="mongodb://user:pass@host:27017 or mongodb+srv://..."
+                  placeholder={
+                    editingId
+                      ? 'Leave blank to keep the existing connection string'
+                      : 'mongodb://user:pass@host:27017 or mongodb+srv://...'
+                  }
                   className="w-full px-3 py-2 pr-10 rounded-lg text-xs border outline-none font-mono transition-colors"
                   style={{
                     background: 'var(--surface-2)',
@@ -258,7 +306,7 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
               <div className="flex gap-2 pt-1">
                 <button
                   onClick={handleFormTest}
-                  disabled={!form.uri || formTestStatus === 'testing'}
+                  disabled={(!form.uri && !editingId) || formTestStatus === 'testing'}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border transition-all hover:bg-white/5 disabled:opacity-40"
                   style={{ borderColor: 'var(--border)', color: 'var(--text-2)' }}
                 >
@@ -314,7 +362,7 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
             ) : (
               <div className="space-y-2">
                 {connections.map((conn) => {
-                  const isConnected = currentUri === getDecryptedUri(conn.id)
+                  const isConnected = currentConnectionId === conn.id
                   const isTesting = testingId === conn.id
                   const isConnecting = connectingId === conn.id
 
@@ -345,11 +393,14 @@ export default function ConnectionManager({ currentUri, onConnect, onClose, canC
                             </span>
                           )}
                         </p>
-                        <p className="text-xs flex items-center gap-1 mt-0.5" style={{ color: 'var(--text-3)' }}>
-                          <Clock size={10} />
-                          {conn.lastUsed
-                            ? `Used ${new Date(conn.lastUsed).toLocaleDateString()}`
-                            : `Added ${new Date(conn.createdAt).toLocaleDateString()}`}
+                        <p className="text-xs flex items-center gap-1 mt-0.5 truncate" style={{ color: 'var(--text-3)' }}>
+                          <Clock size={10} className="shrink-0" />
+                          <span className="truncate">
+                            {conn.lastUsed
+                              ? `Used ${new Date(conn.lastUsed).toLocaleDateString()}`
+                              : `Added ${new Date(conn.createdAt).toLocaleDateString()}`}
+                            {' · '}{conn.maskedUri}
+                          </span>
                         </p>
                       </div>
 

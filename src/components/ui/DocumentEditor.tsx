@@ -16,7 +16,14 @@ const LINE_PX       = EDITOR_SIZE * EDITOR_LINE_H   // ~20.8 px
 const GUTTER_W      = 48                             // px
 
 export default function DocumentEditor({ document: doc, mode, onSave, onClose }: Props) {
-  const [json,    setJson]    = useState('')
+  // Safe as a lazy initializer (rather than an effect that calls setJson)
+  // because the parent passes a `key` keyed to the document/mode, so this
+  // component fully remounts — and therefore re-runs this initializer —
+  // whenever the target document changes; it never needs to react to a
+  // prop change on an already-mounted instance.
+  const [json, setJson] = useState(() =>
+    JSON.stringify(mode === 'insert' ? (Object.keys(doc).length ? doc : {}) : doc, null, 2)
+  )
   const [error,   setError]   = useState('')
   const [saving,  setSaving]  = useState(false)
   const [copied,  setCopied]  = useState(false)
@@ -24,16 +31,12 @@ export default function DocumentEditor({ document: doc, mode, onSave, onClose }:
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const gutterRef   = useRef<HTMLDivElement>(null)
 
-  // Initialise editor content
+  // Focus is a one-off imperative DOM action on mount, not state — a
+  // legitimate effect with nothing to suppress.
   useEffect(() => {
-    const initial = JSON.stringify(
-      mode === 'insert' ? (Object.keys(doc).length ? doc : {}) : doc,
-      null,
-      2
-    )
-    setJson(initial)
-    setTimeout(() => textareaRef.current?.focus(), 60)
-  }, [doc, mode])
+    const t = setTimeout(() => textareaRef.current?.focus(), 60)
+    return () => clearTimeout(t)
+  }, [])
 
   // Keep gutter scroll in sync with textarea scroll
   const syncScroll = useCallback(() => {

@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { Filter, ArrowUpDown, Hash, Play, RotateCcw } from 'lucide-react'
 import type { QueryState } from '@/components/layout/AppShell'
 
@@ -13,16 +13,13 @@ function isDefaultQuery(q: QueryState) {
 }
 
 export default function QueryBar({ query, onChange }: Props) {
+  // No effect needed to keep this in sync with the `query` prop: the
+  // parent renders this component with `key={db+collection}`, so React
+  // remounts it (re-running this initializer) whenever the active
+  // collection changes, instead of updating an already-mounted instance.
   const [local, setLocal] = useState(query)
   const [filterError, setFilterError] = useState('')
   const [sortError, setSortError] = useState('')
-
-  // Sync when parent resets query (e.g. switching collection)
-  useEffect(() => {
-    setLocal(query)
-    setFilterError('')
-    setSortError('')
-  }, [query])
 
   function validate(str: string): boolean {
     if (!str.trim() || str.trim() === '{}') return true
@@ -173,11 +170,18 @@ export default function QueryBar({ query, onChange }: Props) {
         )}
         <button
           onClick={handleApply}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-all hover:opacity-90"
+          className="relative flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-all hover:opacity-90"
           style={{ background: 'var(--brand)', color: '#fff' }}
+          title={isDirty ? 'You have unapplied changes' : undefined}
         >
           <Play size={11} />
           Run
+          {isDirty && (
+            <span
+              className="absolute -top-1 -right-1 w-2 h-2 rounded-full"
+              style={{ background: '#fff', boxShadow: '0 0 0 2px var(--brand)' }}
+            />
+          )}
         </button>
       </div>
     </div>

@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useLayoutEffect, useState, useCallback, useRef } from 'react'
 import {
   Database, Layers, Settings, ChevronRight, ChevronDown,
   RefreshCw, HardDrive, Plus, Trash2, X, Check,
@@ -11,7 +11,7 @@ interface DbInfo { name: string; sizeOnDisk?: number }
 interface ColInfo { name: string; type: string; count?: number }
 
 interface Props {
-  uri: string | null
+  connectionId: string | null
   activeDb: string | null
   activeCol: string | null
   onSelectCollection: (db: string, col: string) => void
@@ -36,11 +36,31 @@ function fmtBytes(bytes?: number): string {
 interface MenuProps {
   items: { label: string; icon: React.ReactNode; danger?: boolean; onClick: () => void }[]
   onClose: () => void
-  anchorRef: React.RefObject<HTMLElement>
+  /** Resolves the trigger button lazily, from inside an effect — never read
+   *  during render. (Reading a ref's `.current` while rendering isn't safe:
+   *  it isn't guaranteed to reflect the latest committed DOM node, especially
+   *  under Strict Mode / concurrent rendering.) */
+  getAnchorEl: () => HTMLElement | null
 }
 
-function ContextMenu({ items, onClose, anchorRef }: MenuProps) {
+function ContextMenu({ items, onClose, getAnchorEl }: MenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+
+  useLayoutEffect(() => {
+    const anchorEl = getAnchorEl()
+    if (!anchorEl) { onClose(); return }
+    const rect = anchorEl.getBoundingClientRect()
+    // This is exactly the documented exception to "don't setState in an
+    // effect": measuring a DOM node's position after commit and storing it
+    // in state, since it can't be computed during render. See
+    // https://react.dev/learn/you-might-not-need-an-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPos({ top: rect.bottom + 4, left: rect.left })
+    // Intentionally only run once, when the menu opens — not on every
+    // onClose/getAnchorEl identity change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     function handle(e: MouseEvent) {
@@ -52,17 +72,15 @@ function ContextMenu({ items, onClose, anchorRef }: MenuProps) {
     return () => { document.removeEventListener('mousedown', handle); document.removeEventListener('keydown', handleKey) }
   }, [onClose])
 
-  // Position relative to anchor
-  const rect = anchorRef.current?.getBoundingClientRect()
-  const top  = rect ? rect.bottom + 4 : 0
-  const left = rect ? rect.left : 0
+  // Not positioned yet (first paint) — render nothing rather than flash at (0,0).
+  if (!pos) return null
 
   return (
     <div
       ref={menuRef}
       className="fixed z-50 rounded-lg border py-1 shadow-xl"
       style={{
-        top, left,
+        top: pos.top, left: pos.left,
         background: 'var(--surface-2)',
         borderColor: 'var(--border)',
         minWidth: '160px',
@@ -122,7 +140,7 @@ function CreateCollectionInput({ onConfirm, onCancel }: CreateColProps) {
 
 // ── main Sidebar ──────────────────────────────────────────────────────────────
 export default function Sidebar({
-  uri, activeDb, activeCol,
+  connectionId, activeDb, activeCol,
   onSelectCollection, onManageConnections,
   onCollectionDropped, onDatabaseDropped,
   mobileOpen = false, onMobileClose,
@@ -137,7 +155,6 @@ export default function Sidebar({
   const [ctxMenu, setCtxMenu] = useState<{
     type: 'db' | 'col'; dbName: string; colName?: string
   } | null>(null)
-  const ctxAnchorRef = useRef<HTMLButtonElement>(null)
   const ctxAnchorRefs = useRef<Record<string, HTMLButtonElement | null>>({})
 
   // Inline "create collection" input per db
@@ -145,27 +162,27 @@ export default function Sidebar({
 
   // ── data fetching ─────────────────────────────────────────────────────────
   const fetchDatabases = useCallback(async () => {
-    if (!uri) return
+    if (!connectionId) return
     setLoadingDbs(true)
     try {
       const res  = await fetch('/api/databases', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri }),
+        body: JSON.stringify({ connectionId }),
       })
       const data = await res.json()
       if (data.success) setDatabases(data.data)
       else toast.error(data.error || 'Failed to load databases')
     } catch { toast.error('Network error loading databases') }
     finally { setLoadingDbs(false) }
-  }, [uri])
+  }, [connectionId])
 
   const fetchCollections = useCallback(async (dbName: string) => {
-    if (!uri) return
+    if (!connectionId) return
     setLoadingCols((p) => new Set(Array.from(p).concat(dbName)))
     try {
       const res  = await fetch('/api/collections', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri, database: dbName }),
+        body: JSON.stringify({ connectionId, database: dbName }),
       })
       const data = await res.json()
       if (data.success) setCollections((p) => ({ ...p, [dbName]: data.data }))
@@ -174,12 +191,16 @@ export default function Sidebar({
     finally {
       setLoadingCols((p) => { const n = new Set(p); n.delete(dbName); return n })
     }
-  }, [uri])
+  }, [connectionId])
 
   useEffect(() => {
+    // Resetting local UI state when the active connection changes, then
+    // kicking off the fetch for the new one — a standard "sync with an
+    // external system (the server) when a prop changes" effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDatabases([]); setCollections({}); setExpandedDbs(new Set())
     fetchDatabases()
-  }, [uri, fetchDatabases])
+  }, [connectionId, fetchDatabases])
 
   async function toggleDb(dbName: string) {
     const next = new Set(expandedDbs)
@@ -197,7 +218,7 @@ export default function Sidebar({
     try {
       const res  = await fetch('/api/collections/manage', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri, database: dbName, collection: colName }),
+        body: JSON.stringify({ connectionId, database: dbName, collection: colName }),
       })
       const data = await res.json()
       if (data.success) {
@@ -214,7 +235,7 @@ export default function Sidebar({
     try {
       const res  = await fetch('/api/collections/manage', {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri, database: dbName, collection: colName }),
+        body: JSON.stringify({ connectionId, database: dbName, collection: colName, confirm: colName }),
       })
       const data = await res.json()
       if (data.success) {
@@ -232,7 +253,7 @@ export default function Sidebar({
     try {
       const res  = await fetch('/api/databases/manage', {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri, database: dbName }),
+        body: JSON.stringify({ connectionId, database: dbName, confirm: dbName }),
       })
       const data = await res.json()
       if (data.success) {
@@ -296,7 +317,7 @@ export default function Sidebar({
 
       {/* Tree */}
       <nav className="flex-1 overflow-y-auto py-1">
-        {!uri ? (
+        {!connectionId ? (
           <div className="flex flex-col items-center gap-2 mt-12 px-4 text-center">
             <HardDrive size={24} strokeWidth={1} style={{ color: 'var(--text-3)' }} />
             <p className="text-xs" style={{ color: 'var(--text-3)' }}>No connection active</p>
@@ -442,16 +463,16 @@ export default function Sidebar({
       {/* Footer */}
       <div className="px-3 py-2 border-t shrink-0" style={{ borderColor: 'var(--border)' }}>
         <p style={{ color: 'var(--text-3)', fontSize: '10px' }}>
-          {uri ? `${databases.length} database${databases.length !== 1 ? 's' : ''}` : 'Not connected'}
+          {connectionId ? `${databases.length} database${databases.length !== 1 ? 's' : ''}` : 'Not connected'}
         </p>
       </div>
 
       {/* Context menu (renders in portal-like fixed div) */}
       {ctxMenu && (() => {
-        const key      = ctxMenu.type === 'db' ? `db-${ctxMenu.dbName}` : `col-${ctxMenu.dbName}-${ctxMenu.colName}`
-        const anchorEl = ctxAnchorRefs.current[key]
-        const fakeRef  = { current: anchorEl } as React.RefObject<HTMLElement>
-        if (!anchorEl) return null
+        // Pure string computation only — no ref access here. The actual
+        // ctxAnchorRefs.current[key] lookup happens inside ContextMenu's
+        // own effect, not during this render.
+        const key = ctxMenu.type === 'db' ? `db-${ctxMenu.dbName}` : `col-${ctxMenu.dbName}-${ctxMenu.colName}`
 
         const dbItems = [
           {
@@ -488,9 +509,10 @@ export default function Sidebar({
 
         return (
           <ContextMenu
+            key={key}
             items={ctxMenu.type === 'db' ? dbItems : colItems}
             onClose={() => setCtxMenu(null)}
-            anchorRef={fakeRef}
+            getAnchorEl={() => ctxAnchorRefs.current[key] ?? null}
           />
         )
       })()}

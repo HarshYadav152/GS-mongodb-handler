@@ -1,14 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClient } from '@/lib/mongodb'
+import { getUri } from '@/lib/connectionStore'
+import { toApiError, AppError } from '@/lib/errors'
 
 // DELETE → drop an entire database
 export async function DELETE(req: NextRequest) {
   try {
-    const { uri, database } = await req.json()
+    const { connectionId, database, confirm } = await req.json()
 
-    if (!uri || !database) {
+    if (!connectionId || !database) {
       return NextResponse.json(
-        { success: false, error: 'uri and database are required' },
+        { success: false, error: 'connectionId and database are required' },
         { status: 400 }
       )
     }
@@ -21,12 +23,22 @@ export async function DELETE(req: NextRequest) {
       )
     }
 
+    // Server-side confirmation: the client UI still shows a confirm()
+    // dialog, but that alone is trivially bypassed by calling this route
+    // directly. The caller must also echo the exact database name back —
+    // this can't be satisfied by a generic "yes"/true, so an automated or
+    // careless caller can't drop a database without explicitly naming it.
+    if (confirm !== database) {
+      throw new AppError('Drop not confirmed: `confirm` must exactly match the database name', 400)
+    }
+
+    const uri    = await getUri(connectionId)
     const client = await getClient(uri)
     await client.db(database).dropDatabase()
 
     return NextResponse.json({ success: true, data: { dropped: database } })
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Failed to drop database'
-    return NextResponse.json({ success: false, error: message }, { status: 500 })
+  } catch (err) {
+    const { message, status } = toApiError(err, 'Failed to drop database')
+    return NextResponse.json({ success: false, error: message }, { status })
   }
 }

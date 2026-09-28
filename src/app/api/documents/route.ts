@@ -1,24 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getClient, parseQueryFilter } from '@/lib/mongodb'
+import { getClient, parseQueryFilter, assertSafeQueryObject } from '@/lib/mongodb'
+import { getUri } from '@/lib/connectionStore'
+import { toApiError, AppError } from '@/lib/errors'
 import { ObjectId, Sort } from 'mongodb'
 
 // ── BSON helpers ──────────────────────────────────────────────────────────────
-
-/** Resolve an _id that may be a plain string, number, or {$oid:"..."} shape */
-function resolveId(id: unknown): unknown {
-  if (typeof id === 'string' && ObjectId.isValid(id) && id.length === 24) {
-    return new ObjectId(id)
-  }
-  if (
-    id !== null &&
-    typeof id === 'object' &&
-    '$oid' in (id as object) &&
-    typeof (id as Record<string, unknown>).$oid === 'string'
-  ) {
-    return new ObjectId((id as { $oid: string }).$oid)
-  }
-  return id // numbers, custom string _ids, etc.
-}
 
 /** Recursively convert {$oid} / {$date} back to native BSON for writes */
 function deserializeBSON(value: unknown): unknown {
@@ -61,24 +47,28 @@ function serializeBSON(value: unknown): unknown {
 export async function POST(req: NextRequest) {
   try {
     const {
-      uri, database, collection,
+      connectionId, database, collection,
       filter = '{}', sort = '{}', limit = 20, skip = 0, projection = '{}',
     } = await req.json()
 
-    if (!uri || !database || !collection) {
+    if (!connectionId || !database || !collection) {
       return NextResponse.json(
-        { success: false, error: 'uri, database, and collection are required' },
+        { success: false, error: 'connectionId, database, and collection are required' },
         { status: 400 }
       )
     }
 
+    const uri      = await getUri(connectionId)
     const client   = await getClient(uri)
     const col      = client.db(database).collection(collection)
-    const filterObj = parseQueryFilter(filter)
-    const sortObj   = parseQueryFilter(sort)
-    const projObj   = parseQueryFilter(projection)
-    const limitNum  = Math.min(Math.max(1, Number(limit)), 1000)
-    const skipNum   = Math.max(0, Number(skip))
+    // Filters can carry `$where`-style operators — sort/projection can't,
+    // so only the filter is checked against the operator denylist.
+    const filterObj = parseQueryFilter(filter, /* checkOperators */ true)
+    const sortObj    = parseQueryFilter(sort)
+    const projObj    = parseQueryFilter(projection)
+    const limitNum   = Math.min(Math.max(1, Number(limit)), 1000)
+    const skipNum    = Math.max(0, Number(skip))
+    const hasFilter  = Object.keys(filterObj).length > 0
 
     const [rawDocs, total] = await Promise.all([
       col
@@ -87,7 +77,12 @@ export async function POST(req: NextRequest) {
         .skip(skipNum)
         .limit(limitNum)
         .toArray(),
-      col.countDocuments(filterObj),
+      // estimatedDocumentCount() is a fast metadata read but ignores the
+      // filter; only pay for an exact (and capped) count when a filter is
+      // actually applied.
+      hasFilter
+        ? col.countDocuments(filterObj, { maxTimeMS: 5_000 })
+        : col.estimatedDocumentCount(),
     ])
 
     const documents = rawDocs.map(serializeBSON)
@@ -102,9 +97,9 @@ export async function POST(req: NextRequest) {
         totalPages: Math.max(1, Math.ceil(total / limitNum)),
       },
     })
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Query failed'
-    return NextResponse.json({ success: false, error: message }, { status: 500 })
+  } catch (err) {
+    const { message, status } = toApiError(err, 'Query failed')
+    return NextResponse.json({ success: false, error: message }, { status })
   }
 }
 
@@ -112,31 +107,29 @@ export async function POST(req: NextRequest) {
 
 export async function PUT(req: NextRequest) {
   try {
-    const { uri, database, collection, document } = await req.json()
+    const { connectionId, database, collection, document } = await req.json()
 
-    if (!uri || !database || !collection || document === undefined) {
+    if (!connectionId || !database || !collection || document === undefined) {
       return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 })
     }
     if (typeof document !== 'object' || Array.isArray(document) || document === null) {
       return NextResponse.json({ success: false, error: 'document must be a JSON object' }, { status: 400 })
     }
 
+    const uri    = await getUri(connectionId)
     const client = await getClient(uri)
     const col    = client.db(database).collection(collection)
 
     const toInsert = deserializeBSON(document) as Record<string, unknown>
-    if ('_id' in toInsert) {
-      toInsert._id = resolveId(toInsert._id) as never
-    }
 
     const result = await col.insertOne(toInsert)
     return NextResponse.json({
       success: true,
       data: { insertedId: result.insertedId.toString() },
     })
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Insert failed'
-    return NextResponse.json({ success: false, error: message }, { status: 500 })
+  } catch (err) {
+    const { message, status } = toApiError(err, 'Insert failed')
+    return NextResponse.json({ success: false, error: message }, { status })
   }
 }
 
@@ -144,19 +137,21 @@ export async function PUT(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   try {
-    const { uri, database, collection, id, update } = await req.json()
+    const { connectionId, database, collection, id, update } = await req.json()
 
-    if (!uri || !database || !collection || !id || update === undefined) {
+    if (!connectionId || !database || !collection || id === undefined || update === undefined) {
       return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 })
     }
     if (typeof update !== 'object' || Array.isArray(update) || update === null) {
       return NextResponse.json({ success: false, error: 'update must be a JSON object' }, { status: 400 })
     }
 
+    const uri    = await getUri(connectionId)
     const client = await getClient(uri)
     const col    = client.db(database).collection(collection)
 
     let updatePayload = deserializeBSON(update) as Record<string, unknown>
+    assertSafeQueryObject(updatePayload)
 
     const hasOperators = Object.keys(updatePayload).some((k) => k.startsWith('$'))
 
@@ -173,16 +168,22 @@ export async function PATCH(req: NextRequest) {
       updatePayload = { $set: updatePayload }
     }
 
-    const resolvedId = resolveId(id)
+    // `id` is the client's already-serialized `_id` value (e.g. {"$oid": "..."},
+    // a plain string, or a number) as returned by the read endpoint — NOT a
+    // flattened/guessed string. Deserializing it the same way we deserialize
+    // document bodies means a 24-hex-character *string* `_id` (a legitimate,
+    // non-ObjectId id shape) is never misinterpreted as an ObjectId, which a
+    // previous heuristic-based `resolveId()` helper could do.
+    const resolvedId = deserializeBSON(id)
     const result = await col.updateOne({ _id: resolvedId as ObjectId }, updatePayload)
 
     return NextResponse.json({
       success: true,
       data: { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount },
     })
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Update failed'
-    return NextResponse.json({ success: false, error: message }, { status: 500 })
+  } catch (err) {
+    const { message, status } = toApiError(err, 'Update failed')
+    return NextResponse.json({ success: false, error: message }, { status })
   }
 }
 
@@ -190,27 +191,28 @@ export async function PATCH(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
-    const { uri, database, collection, id } = await req.json()
+    const { connectionId, database, collection, id } = await req.json()
 
-    if (!uri || !database || !collection || !id) {
+    if (!connectionId || !database || !collection || id === undefined) {
       return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 })
     }
 
-    const client     = await getClient(uri)
-    const col        = client.db(database).collection(collection)
-    const resolvedId = resolveId(id)
-    const result     = await col.deleteOne({ _id: resolvedId as ObjectId })
+    const uri        = await getUri(connectionId)
+    const client      = await getClient(uri)
+    const col         = client.db(database).collection(collection)
+    const resolvedId  = deserializeBSON(id)
+    const result      = await col.deleteOne({ _id: resolvedId as ObjectId })
 
     if (result.deletedCount === 0) {
-      return NextResponse.json({ success: false, error: 'Document not found' }, { status: 404 })
+      throw new AppError('Document not found', 404)
     }
 
     return NextResponse.json({
       success: true,
       data: { deletedCount: result.deletedCount },
     })
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Delete failed'
-    return NextResponse.json({ success: false, error: message }, { status: 500 })
+  } catch (err) {
+    const { message, status } = toApiError(err, 'Delete failed')
+    return NextResponse.json({ success: false, error: message }, { status })
   }
 }
